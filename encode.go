@@ -1,0 +1,4 @@
+package goico
+
+func Encode() {
+}
