@@ -14,8 +14,11 @@ Implements basic support for encoding and decoding ICO files.
 
 * PNG Images
 
+## Usage
+
+### Config Decoding
+
 ```go
-// decode config
 f, err := os.Open("favicon.ico")
 if err != nil {
     panic(err)
@@ -26,8 +29,11 @@ config, err := goico.DecodeConfig(f)
 if err != nil {
     panic(err)
 }
+```
 
-// decode
+### Decoding
+
+```go
 f, err := os.Open("favicon.ico")
 if err != nil {
     panic(err)
@@ -38,15 +44,18 @@ config, imgs, err := goico.Decode(f)
 if err != nil {
     panic(err)
 }
+```
 
-// encode
+### Encoding
+
+```go
 f, err := os.Create("favicon.ico")
 if err != nil {
     panic(err)
 }
 defer f.Close()
 
-imgs := []image.Image{...}
+imgs := []image.Image{...} // images with a max size of 256x256
 ico, err := goico.NewICOConfig(imgs)
 if err != nil {
     panic(err)
