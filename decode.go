@@ -10,15 +10,7 @@ import (
 	"golang.org/x/image/bmp"
 )
 
-type DIR struct {
-	Header uint16
-	Type   ICOType
-	Count  uint16
-
-	Entries []*DIR_Entry // length equal to Count
-}
-
-type DIR_Entry struct {
+type dirEntry struct {
 	Width  uint8
 	Height uint8
 	Colors uint8
@@ -26,8 +18,6 @@ type DIR_Entry struct {
 	Data2  uint16 // ICO: bits per pixel; CUR: Hotspot Y
 	Size   uint32
 	Offset uint32
-
-	Img image.Image
 }
 
 type FormatError string
@@ -42,62 +32,140 @@ func NewFormatErrorf(format string, args ...interface{}) FormatError {
 	return FormatError(fmt.Sprintf(format, args...))
 }
 
-const EXT_ICO string = ".ico"
-const EXT_CUR string = ".cur"
+func Decode(r io.ReadSeeker) (*ICOConfig, []image.Image, error) {
+	_, tv, cv, err := decodeICONDIR(r)
+	if err != nil {
+		return nil, []image.Image{}, err
+	}
 
-const HEADER uint16 = 0x00 // starts with 2 0 bytes.
-const HEADER_LEN = 6
-const ENTRY_LEN = 16
-const MIN_OFFSET = 54
+	data := &ICOConfig{
+		Count:   int(cv),
+		Type:    tv,
+		Entries: []ICOConfigEntry{},
+	}
 
-type ICOType uint16
+	imgs := []image.Image{}
 
-const (
-	TYPE_NIL ICOType = 0x00
-	TYPE_ICO ICOType = 0x01 // .ico is type 1.
-	TYPE_CUR ICOType = 0x02 // .cur is type 2.
-)
+	largest := 0
+	for i := range int(cv) {
+		entryData, err := decodeICONDIRENTRY(r)
+		if err != nil {
+			return nil, []image.Image{}, err
+		}
 
-func Decode(r io.ReadSeeker) (*DIR, error) {
-	data := &DIR{}
+		// size of 0 is used for a size of 256
+		width := int(entryData.Width)
+		if width == 0 {
+			width = 256
+		}
+		height := int(entryData.Height)
+		if height == 0 {
+			height = 256
+		}
 
-	hv, tv, cv, err := decodeICONDIR(r)
+		size := width * height
+		if size > largest {
+			largest = size
+			data.Largest = i
+		}
+
+		// CUR: Hotspot X and Y are stored in Data1 and Data2.
+		// Remove them for ICO, as they are not used after decoding.
+		data1 := int(entryData.Data1)
+		data2 := int(entryData.Data2)
+		if tv == TYPE_ICO {
+			data1 = 0
+			data2 = 0
+		}
+
+		data.Entries = append(data.Entries, ICOConfigEntry{
+			Width:  width,
+			Height: height,
+			Colors: int(entryData.Colors),
+			Data1:  data1,
+			Data2:  data2,
+		})
+
+		img, err := decodeICONDIRENTRYData(r, entryData)
+		if err != nil {
+			return nil, []image.Image{}, err
+		}
+
+		imgs = append(imgs, img)
+	}
+
+	return data, imgs, nil
+}
+
+func DecodeConfig(r io.Reader) (*ICOConfig, error) {
+	_, tv, cv, err := decodeICONDIR(r)
 	if err != nil {
 		return nil, err
 	}
-	data.Header = hv
-	data.Type = tv
-	data.Count = cv
 
-	entries, err := decodeICONDIRENTRY(r, cv)
-	if err != nil {
-		return nil, err
+	data := &ICOConfig{
+		Count:   int(cv),
+		Type:    tv,
+		Entries: []ICOConfigEntry{},
 	}
-	data.Entries = *entries
 
-	for i := range cv {
-		err := decodeICONDIRENTRYData(r, data.Entries[i])
+	largest := 0
+	for i := range int(cv) {
+		entryData, err := decodeICONDIRENTRY(r)
 		if err != nil {
 			return nil, err
 		}
+
+		// size of 0 is used for a size of 256
+		width := int(entryData.Width)
+		if width == 0 {
+			width = 256
+		}
+		height := int(entryData.Height)
+		if height == 0 {
+			height = 256
+		}
+
+		size := width * height
+		if size > largest {
+			largest = size
+			data.Largest = i
+		}
+
+		// CUR: Hotspot X and Y are stored in Data1 and Data2.
+		// Remove them for ICO, as they are not used after decoding.
+		data1 := int(entryData.Data1)
+		data2 := int(entryData.Data2)
+		if tv == TYPE_ICO {
+			data1 = 0
+			data2 = 0
+		}
+
+		data.Entries = append(data.Entries, ICOConfigEntry{
+			Width:  width,
+			Height: height,
+			Colors: int(entryData.Colors),
+			Data1:  data1,
+			Data2:  data2,
+		})
 	}
 
 	return data, nil
 }
 
 func decodeICONDIR(r io.Reader) (uint16, ICOType, uint16, error) {
-	header := make([]byte, HEADER_LEN)
+	header := make([]byte, header_len)
 	n, err := r.Read(header)
 	if err != nil {
 		return 0, TYPE_NIL, 0, NewFormatErrorf("error reading header: %v", err)
 	}
-	if n != HEADER_LEN {
-		return 0, TYPE_NIL, 0, NewFormatErrorf("error reading header: expected %d bytes, got %d", HEADER_LEN, n)
+	if n != header_len {
+		return 0, TYPE_NIL, 0, NewFormatErrorf("error reading header: expected %d bytes, got %d", header_len, n)
 	}
 
 	headerValue := binary.LittleEndian.Uint16(header[:2])
-	if headerValue != HEADER {
-		return 0, TYPE_NIL, 0, NewFormatErrorf("invalid header: expected 0x%02x, got 0x%02x", HEADER, headerValue)
+	if headerValue != headerV {
+		return 0, TYPE_NIL, 0, NewFormatErrorf("invalid header: expected 0x%02x, got 0x%02x", headerV, headerValue)
 	}
 
 	typeValue := ICOType(binary.LittleEndian.Uint16(header[2:4]))
@@ -113,54 +181,45 @@ func decodeICONDIR(r io.Reader) (uint16, ICOType, uint16, error) {
 	return headerValue, typeValue, countValue, nil
 }
 
-func decodeICONDIRENTRY(r io.Reader, count uint16) (*[]*DIR_Entry, error) {
-	entries := make([]*DIR_Entry, count)
-
-	for i := range count {
-		entry := make([]byte, ENTRY_LEN)
-		n, err := r.Read(entry)
-		if err != nil {
-			return nil, NewFormatErrorf("error reading entry: %v", err)
-		}
-		if n != ENTRY_LEN {
-			return nil, NewFormatErrorf("error reading entry: expected %d bytes, got %d", ENTRY_LEN, n)
-		}
-
-		width := uint8(entry[0])
-		height := uint8(entry[1])
-		colors := uint8(entry[2])
-		reserved := uint8(entry[3])
-		if reserved != 0 {
-			return nil, NewFormatErrorf("invalid reserved byte: expected 0, got %d", reserved)
-		}
-
-		data1 := binary.LittleEndian.Uint16(entry[4:6])
-		data2 := binary.LittleEndian.Uint16(entry[6:8])
-		size := binary.LittleEndian.Uint32(entry[8:12])
-		if size == 0 {
-			return nil, NewFormatError("invalid size: expected > 0, got 0")
-		}
-
-		offset := binary.LittleEndian.Uint32(entry[12:16])
-		if offset < MIN_OFFSET {
-			return nil, NewFormatErrorf("invalid offset: expected >= %d, got %d", MIN_OFFSET, offset)
-		}
-
-		entries[i] = &DIR_Entry{
-			Width:  width,
-			Height: height,
-			Colors: colors,
-			Data1:  data1,
-			Data2:  data2,
-			Size:   size,
-			Offset: offset,
-		}
+func decodeICONDIRENTRY(r io.Reader) (*dirEntry, error) {
+	entry := make([]byte, entry_len)
+	n, err := r.Read(entry)
+	if err != nil {
+		return nil, NewFormatErrorf("error reading entry: %v", err)
+	}
+	if n != entry_len {
+		return nil, NewFormatErrorf("error reading entry: expected %d bytes, got %d", entry_len, n)
 	}
 
-	return &entries, nil
+	width := uint8(entry[0])
+	height := uint8(entry[1])
+	colors := uint8(entry[2])
+	reserved := uint8(entry[3])
+	if reserved != 0 {
+		return nil, NewFormatErrorf("invalid reserved byte: expected 0, got %d", reserved)
+	}
+
+	data1 := binary.LittleEndian.Uint16(entry[4:6])
+	data2 := binary.LittleEndian.Uint16(entry[6:8])
+	size := binary.LittleEndian.Uint32(entry[8:12])
+	if size == 0 {
+		return nil, NewFormatError("invalid size: expected > 0, got 0")
+	}
+
+	offset := binary.LittleEndian.Uint32(entry[12:16])
+
+	return &dirEntry{
+		Width:  width,
+		Height: height,
+		Colors: colors,
+		Data1:  data1,
+		Data2:  data2,
+		Size:   size,
+		Offset: offset,
+	}, nil
 }
 
-type BMPHeader struct {
+type bmpheader struct {
 	Field     uint16
 	Size      uint32
 	Reserved1 uint16
@@ -168,7 +227,7 @@ type BMPHeader struct {
 	Offset    uint32
 }
 
-func (h *BMPHeader) Bytes() []byte {
+func (h *bmpheader) Bytes() []byte {
 	b := make([]byte, 14)
 	binary.LittleEndian.PutUint16(b[:2], h.Field)
 	binary.LittleEndian.PutUint32(b[2:6], h.Size)
@@ -178,27 +237,31 @@ func (h *BMPHeader) Bytes() []byte {
 	return b
 }
 
-func decodeICONDIRENTRYData(r io.ReadSeeker, entry *DIR_Entry) error {
+func decodeICONDIRENTRYData(r io.ReadSeeker, entry *dirEntry) (image.Image, error) {
+	currPos, _ := r.Seek(0, io.SeekCurrent)
 	p, err := r.Seek(int64(entry.Offset), io.SeekStart)
 	if err != nil {
-		return NewFormatErrorf("error seeking to entry data: %v", err)
+		return nil, NewFormatErrorf("error seeking to entry data: %v", err)
 	}
 	if p != int64(entry.Offset) {
-		return NewFormatErrorf("error seeking to entry data: expected offset %d, got %d", entry.Offset, p)
+		return nil, NewFormatErrorf("error seeking to entry data: expected offset %d, got %d", entry.Offset, p)
 	}
 
 	data := make([]byte, entry.Size)
 	n, err := r.Read(data)
 	if err != nil {
-		return NewFormatErrorf("error reading entry data: %v", err)
+		return nil, NewFormatErrorf("error reading entry data: %v", err)
 	}
 	if n != int(entry.Size) {
-		return NewFormatErrorf("error reading entry data: expected %d bytes, got %d", entry.Size, n)
+		return nil, NewFormatErrorf("error reading entry data: expected %d bytes, got %d", entry.Size, n)
 	}
 
 	headerLength := binary.LittleEndian.Uint32(data[0:4])
+	if headerLength == 137 {
+		return nil, NewFormatError("png format not supported")
+	}
 
-	header := BMPHeader{
+	header := bmpheader{
 		Field:     0x4d42,          // "BM"
 		Size:      entry.Size + 14, // size of BMP header + size of data
 		Reserved1: 0,
@@ -211,7 +274,7 @@ func decodeICONDIRENTRYData(r io.ReadSeeker, entry *DIR_Entry) error {
 
 	img, err := bmp.Decode(bytes.NewReader(data))
 	if err != nil {
-		return NewFormatErrorf("error decoding BMP data: %v", err)
+		return nil, NewFormatErrorf("error decoding BMP data: %v", err)
 	}
 
 	// alpha hack
@@ -239,6 +302,6 @@ func decodeICONDIRENTRYData(r io.ReadSeeker, entry *DIR_Entry) error {
 		}
 	}
 
-	entry.Img = img
-	return nil
+	r.Seek(currPos, io.SeekStart)
+	return img, nil
 }

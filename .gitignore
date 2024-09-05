@@ -1,3 +1,5 @@
 
 test/*.png
 test/*.bmp
+test/test.ico
+test/test.cur
